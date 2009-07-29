@@ -1,8 +1,9 @@
+import datetime
 
 from django.db import models
 from django.conf import settings
 from django.utils.encoding import smart_unicode, smart_str
-from django.db.models import signals
+from django.db.models.fields import subclassing
 
 from timezones import forms
 
@@ -17,6 +18,8 @@ assert(reduce(lambda x, y: x and (len(y) <= MAX_TIMEZONE_LENGTH),
        "timezones.fields.TimeZoneField MAX_TIMEZONE_LENGTH is too small")
 
 class TimeZoneField(models.CharField):
+    __metaclass__ = subclassing.SubfieldBase
+    
     def __init__(self, *args, **kwargs):
         defaults = {"max_length": MAX_TIMEZONE_LENGTH,
                     "default": settings.TIME_ZONE,
@@ -47,12 +50,75 @@ class TimeZoneField(models.CharField):
         defaults.update(kwargs)
         return super(TimeZoneField, self).formfield(**defaults)
 
+
+class LocalizedDateTimeFieldProperty(object):
+    # Timezone handling happens on the getter to ensure that callable
+    # LocalizedDateTimeField.timezone values gets passed a fully
+    # initialized model instance. This is important for callables that
+    # reference another model field for the timezone info.
+
+    def __init__(self, field):
+        self.field = field
+        self.cache_attname = '_%s_cache' % self.field.name
+
+    def __get__(self, obj, type=None):
+        if obj is None:
+            raise AttributeError('Can only be accessed via an instance.')
+
+        timezone = self.field.timezone
+
+        if self.cache_attname not in obj.__dict__:
+            if callable(timezone):
+                # letting callable either take no arguments or one
+                # argument, the model instance being accessed.
+                if hasattr(timezone, 'func_code'):
+                    argcount = timezone.func_code.co_argcount
+                elif hasattr(timezone, 'im_func'):
+                    argcount = timezone.im_func.func_code.co_argcount - 1
+                else:
+                    argcount = timezone.__call__.func_code.co_argcount
+                if argcount == 1:
+                    timezone = timezone(obj)
+                else:
+                    timezone = timezone()
+
+            if isinstance(timezone, basestring):
+                try:
+                    tzinfo = pytz.timezone(timezone)
+                except pytz.UnknownTimeZoneError:
+                    tzinfo = default_tz
+            else:
+                tzinfo = timezone
+
+            dt = obj.__dict__[self.field.name]
+            if not isinstance(dt, datetime.datetime):
+                return dt
+            if dt.tzinfo is None:
+                obj.__dict__[self.cache_attname] = tzinfo.localize(dt)
+            else:
+                obj.__dict__[self.cache_attname] = dt.astimezone(tzinfo)
+                
+        return obj.__dict__[self.cache_attname]
+
+    def __set__(self, obj, value):
+        obj.__dict__[self.field.name] = self.field.to_python(value)
+        # clear previously cached value if it exists
+        if self.cache_attname in obj.__dict__:
+            del obj.__dict__[self.cache_attname]
+
+
 class LocalizedDateTimeField(models.DateTimeField):
     """
     A model field that provides automatic localized timezone support.
-    timezone can be a timezone string, a callable (returning a timezone string),
-    or a queryset keyword relation for the model, or a pytz.timezone()
-    result.
+    timezone can be a timezone string, a ``datetime.tzinfo`` subclass
+    such as those returned by ``pytz.timezone``, or a callable which
+    returns either.
+
+    Callable values for the ``timezone`` argument can optionally take
+    one argument, which is the model instance being accessed. To get
+    the timezone from another field on the model object, for example::
+
+        dt = LocalizedDateTimeField(timezone=lambda i: i.timezone)
     """
     def __init__(self, verbose_name=None, name=None, timezone=None, **kwargs):
         if isinstance(timezone, basestring):
@@ -89,51 +155,6 @@ class LocalizedDateTimeField(models.DateTimeField):
             value = value.astimezone(default_tz)
         return super(LocalizedDateTimeField, self).get_db_prep_lookup(lookup_type, value)
 
-def prep_localized_datetime(sender, **kwargs):
-    for field in sender._meta.fields:
-        if not isinstance(field, LocalizedDateTimeField) or field.timezone is None:
-            continue
-        dt_field_name = "_datetimezone_%s" % field.attname
-        def get_dtz_field(instance):
-            return getattr(instance, dt_field_name)
-        def set_dtz_field(instance, dt):
-            if dt.tzinfo is None:
-                dt = default_tz.localize(dt)
-            time_zone = field.timezone
-            if isinstance(field.timezone, basestring):
-                tz_name = instance._default_manager.filter(
-                    pk=model_instance._get_pk_val()
-                ).values_list(field.timezone)[0][0]
-                try:
-                    time_zone = pytz.timezone(tz_name)
-                except:
-                    time_zone = default_tz
-                if time_zone is None:
-                    # lookup failed
-                    time_zone = default_tz
-                    #raise pytz.UnknownTimeZoneError(
-                    #    "Time zone %r from relation %r was not found"
-                    #    % (tz_name, field.timezone)
-                    #)
-            elif callable(time_zone):
-                tz_name = time_zone()
-                if isinstance(tz_name, basestring):
-                    try:
-                        time_zone = pytz.timezone(tz_name)
-                    except:
-                        time_zone = default_tz
-                else:
-                    time_zone = tz_name
-                if time_zone is None:
-                    # lookup failed
-                    time_zone = default_tz
-                    #raise pytz.UnknownTimeZoneError(
-                    #    "Time zone %r from callable %r was not found"
-                    #    % (tz_name, field.timezone)
-                    #)
-            setattr(instance, dt_field_name, dt.astimezone(time_zone))
-        setattr(sender, field.attname, property(get_dtz_field, set_dtz_field))
-
-## RED_FLAG: need to add a check at manage.py validation time that
-##           time_zone value is a valid query keyword (if it is one)
-signals.class_prepared.connect(prep_localized_datetime)
+    def contribute_to_class(self, cls, name):
+        super(self.__class__, self).contribute_to_class(cls, name)
+        setattr(cls, self.name, LocalizedDateTimeFieldProperty(self))
