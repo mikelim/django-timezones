@@ -42,3 +42,13 @@ class LocalizedDateTimeField(forms.DateTimeField):
     def clean(self, value):
         value = super(LocalizedDateTimeField, self).clean(value)
         return adjust_datetime_to_timezone(value, from_tz=self.timezone)
+
+
+class LocalizedSplitDateTimeField(forms.SplitDateTimeField):
+    def __init__(self, timezone=None, *args, **kwargs):
+        super(LocalizedSplitDateTimeField, self).__init__(*args, **kwargs)
+        self.timezone = timezone or settings.TIME_ZONE
+        
+    def clean(self, value):
+        value = super(LocalizedSplitDateTimeField, self).clean(value)
+        return adjust_datetime_to_timezone(value, from_tz=self.timezone)

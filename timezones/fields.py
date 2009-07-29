@@ -1,5 +1,6 @@
 import datetime
 
+from django.forms import SplitDateTimeField
 from django.db import models
 from django.conf import settings
 from django.utils.encoding import smart_unicode, smart_str
@@ -134,6 +135,9 @@ class LocalizedDateTimeField(models.DateTimeField):
         if (not isinstance(self.timezone, basestring) and str(self.timezone) in pytz.all_timezones_set):
             defaults["timezone"] = str(self.timezone)
         defaults.update(kwargs)
+        # Override the admin interface's SplitDateTimeField with the localized version
+        if defaults["form_class"] == SplitDateTimeField:
+            defaults["form_class"] = forms.LocalizedSplitDateTimeField
         return super(LocalizedDateTimeField, self).formfield(**defaults)
         
     def get_db_prep_save(self, value):
